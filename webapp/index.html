@@ -65,6 +65,7 @@
     const enableWebcamButton = document.getElementById("enableWebcamButton");
     const connectButton = document.getElementById("connectButton");
     const btStatus = document.getElementById("btStatus");
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
     let lastSentTotal = null;
     let lastSendTime = 0;
 
@@ -83,22 +84,52 @@
     // Initialisiere die Zeichen-Tools
     const drawingUtils = new DrawingUtils(canvasCtx);
 
+    // Button erst aktivieren, wenn das Modell geladen ist
+    enableWebcamButton.disabled = true;
+
     const createGestureRecognizer = async () => {
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
-      );
-      
-      gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: "./gesture_recognizer.task",
-          delegate: "GPU"
-        },
-        runningMode: runningMode,
-        numHands: 2
-      });
-      
-      statusSpan.innerText = "Modell bereit! Klicke auf Start.";
-      enableWebcamButton.disabled = false;
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+        );
+
+        const buildOptions = (delegate) => ({
+          baseOptions: {
+            modelAssetPath: "./gesture_recognizer.task",
+            delegate
+          },
+          runningMode: runningMode,
+          numHands: 2
+        });
+
+        const preferredDelegate = isMobile ? "CPU" : "GPU";
+        let activeDelegate = preferredDelegate;
+
+        try {
+          gestureRecognizer = await GestureRecognizer.createFromOptions(
+            vision,
+            buildOptions(preferredDelegate)
+          );
+        } catch (delegateError) {
+          // Manche Mobile/Browser blocken GPU, daher CPU-Fallback versuchen.
+          if (preferredDelegate !== "CPU") {
+            console.warn("GPU-Delegate fehlgeschlagen, fallback auf CPU", delegateError);
+            gestureRecognizer = await GestureRecognizer.createFromOptions(
+              vision,
+              buildOptions("CPU")
+            );
+            activeDelegate = "CPU";
+          } else {
+            throw delegateError;
+          }
+        }
+
+        statusSpan.innerText = `Modell bereit! (${activeDelegate}) Klicke auf Start.`;
+        enableWebcamButton.disabled = false;
+      } catch (error) {
+        console.error("GestureRecognizer konnte nicht initialisiert werden:", error);
+        statusSpan.innerText = "Modell konnte nicht geladen werden.";
+      }
     };
 
     createGestureRecognizer();
@@ -108,7 +139,11 @@
       webcamRunning = true;
       enableWebcamButton.style.display = "none";
 
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: isMobile
+          ? { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } } // kleiner stream für Mobile
+          : true
+      });
       video.srcObject = stream;
       video.addEventListener("loadeddata", predictWebcam);
     });
