@@ -48,7 +48,10 @@
   </div>
   
   <div id="output">Warte auf Geste...</div>
-  <button id="enableWebcamButton">Webcam starten</button>
+  <div style="margin-top:10px; display:flex; gap:12px; justify-content:center; align-items:center;">
+    <button id="enableWebcamButton">Webcam starten</button>
+    <button id="switchCameraButton">Kamera: Front</button>
+  </div>
 
   <script type="module">
     import { GestureRecognizer, FilesetResolver, DrawingUtils } 
@@ -63,11 +66,14 @@
     const outputDiv = document.getElementById("output");
     const statusSpan = document.getElementById("status");
     const enableWebcamButton = document.getElementById("enableWebcamButton");
+    const switchCameraButton = document.getElementById("switchCameraButton");
     const connectButton = document.getElementById("connectButton");
     const btStatus = document.getElementById("btStatus");
     const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    let currentFacingMode = "user"; // "user" = Front, "environment" = Rückkamera
     let lastSentTotal = null;
     let lastSendTime = 0;
+    let animationRequestId = null;
 
     // BLE Konstanten (Nordic UART Service)
     const ARDUINO_UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
@@ -86,6 +92,39 @@
 
     // Button erst aktivieren, wenn das Modell geladen ist
     enableWebcamButton.disabled = true;
+    if (!isMobile) {
+      switchCameraButton.style.display = "none";
+    }
+
+    function updateCameraButtonLabel() {
+      switchCameraButton.textContent = currentFacingMode === "user" ? "Kamera: Front" : "Kamera: Rück";
+    }
+
+    function getVideoConstraints() {
+      return isMobile
+        ? { facingMode: currentFacingMode, width: { ideal: 640 }, height: { ideal: 480 } }
+        : true;
+    }
+
+    function stopCurrentStream() {
+      const stream = video.srcObject;
+      if (stream && stream.getTracks) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+    }
+
+    function stopPredictionLoop() {
+      webcamRunning = false;
+      if (animationRequestId) {
+        cancelAnimationFrame(animationRequestId);
+        animationRequestId = null;
+      }
+    }
+
+    function startPredictionLoop() {
+      webcamRunning = true;
+      predictWebcam();
+    }
 
     const createGestureRecognizer = async () => {
       try {
@@ -136,26 +175,71 @@
 
     enableWebcamButton.addEventListener("click", async () => {
       if (!gestureRecognizer) { alert("Warte auf Modell..."); return; }
-      webcamRunning = true;
       enableWebcamButton.style.display = "none";
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: isMobile
-          ? { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } } // kleiner stream für Mobile
-          : true
-      });
-      video.srcObject = stream;
-      video.addEventListener("loadeddata", predictWebcam);
+      try {
+        stopCurrentStream();
+        const stream = await navigator.mediaDevices.getUserMedia({ video: getVideoConstraints() });
+        video.srcObject = stream;
+        video.addEventListener("loadeddata", startPredictionLoop, { once: true });
+      } catch (err) {
+        console.error("Kamera konnte nicht gestartet werden:", err);
+        alert("Kamera konnte nicht gestartet werden.");
+        stopPredictionLoop();
+        enableWebcamButton.style.display = "inline-block";
+      }
     });
+
+    switchCameraButton.addEventListener("click", async () => {
+      if (!isMobile) { return; }
+      currentFacingMode = currentFacingMode === "user" ? "environment" : "user";
+      updateCameraButtonLabel();
+      if (!webcamRunning) { return; }
+      try {
+        stopPredictionLoop();
+        stopCurrentStream();
+        const stream = await navigator.mediaDevices.getUserMedia({ video: getVideoConstraints() });
+        video.srcObject = stream;
+        video.addEventListener("loadeddata", startPredictionLoop, { once: true });
+      } catch (err) {
+        console.error("Kamerawechsel fehlgeschlagen, wechsle zurück auf Front:", err);
+        currentFacingMode = "user";
+        updateCameraButtonLabel();
+        try {
+          stopPredictionLoop();
+          const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: getVideoConstraints() });
+          video.srcObject = fallbackStream;
+          video.addEventListener("loadeddata", startPredictionLoop, { once: true });
+        } catch (fallbackErr) {
+          console.error("Fallback auf Frontkamera fehlgeschlagen:", fallbackErr);
+          alert("Kamera konnte nicht gewechselt werden.");
+        }
+      }
+    });
+
+    updateCameraButtonLabel();
 
     async function predictWebcam() {
       if (runningMode === "IMAGE") {
         runningMode = "VIDEO";
         await gestureRecognizer.setOptions({ runningMode: "VIDEO" });
       }
-      
-      let nowInMs = Date.now();
-      const results = gestureRecognizer.recognizeForVideo(video, nowInMs);
+
+      // Warten, bis Video-Frames bereit sind
+      if (!video.srcObject || video.videoWidth === 0 || video.videoHeight === 0) {
+        animationRequestId = window.requestAnimationFrame(predictWebcam);
+        return;
+      }
+
+      let results;
+      try {
+        const nowInMs = Date.now();
+        results = gestureRecognizer.recognizeForVideo(video, nowInMs);
+      } catch (err) {
+        console.warn("Erkennung übersprungen (Video evtl. noch nicht bereit):", err);
+        animationRequestId = window.requestAnimationFrame(predictWebcam);
+        return;
+      }
 
       // --- HIER BEGINNT DIE VISUALISIERUNG ---
       
@@ -209,7 +293,7 @@
       }
 
       if (webcamRunning) {
-        window.requestAnimationFrame(predictWebcam);
+        animationRequestId = window.requestAnimationFrame(predictWebcam);
       }
     }
 
